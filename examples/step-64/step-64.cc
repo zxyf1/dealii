@@ -678,7 +678,7 @@ namespace Step64
   template <int dim, int fe_degree>
   void HelmholtzProblem<dim, fe_degree>::run()
   {
-    for (unsigned int cycle = 0; cycle < 7 - dim; ++cycle)
+    for (unsigned int cycle = 0; cycle < 9 - dim; ++cycle)
       {
         pcout << "Cycle " << cycle << std::endl;
 
