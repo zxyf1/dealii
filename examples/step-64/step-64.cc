@@ -678,12 +678,12 @@ namespace Step64
   template <int dim, int fe_degree>
   void HelmholtzProblem<dim, fe_degree>::run()
   {
-    for (unsigned int cycle = 0; cycle < 9 - dim; ++cycle)
+    for (unsigned int cycle = 0; cycle < 8 - dim; ++cycle)
       {
         pcout << "Cycle " << cycle << std::endl;
 
         if (cycle == 0)
-          GridGenerator::hyper_cube(triangulation, 0., 1.);
+          GridGenerator::subdivided_hyper_cube(triangulation, 5, 0., 1.);
         triangulation.refine_global(1);
 
         setup_system();
