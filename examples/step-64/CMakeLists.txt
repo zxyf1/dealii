@@ -55,3 +55,11 @@ endif()
 deal_ii_initialize_cached_variables()
 project(${TARGET})
 deal_ii_invoke_autopilot()
+
+#
+# Additional target: step-64_large
+# A variant with larger mesh (subdivided_hyper_cube) and CUDA event timing
+# for stress-testing GPU memory usage.
+#
+add_executable(step-64_large step-64_large.cc)
+deal_ii_setup_target(step-64_large)

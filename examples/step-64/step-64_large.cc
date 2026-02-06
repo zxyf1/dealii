@@ -43,11 +43,59 @@
 
 #include <fstream>
 
+#include <cuda_runtime_api.h>
+
 
 // As usual, we enclose everything into a namespace of its own:
 namespace Step64
 {
   using namespace dealii;
+
+
+  // @sect3{Class <code>GpuTimer</code>}
+
+  // A simple RAII wrapper around CUDA events for accurate GPU-side timing.
+  // cudaEventRecord captures timestamps on the GPU stream, and
+  // cudaEventSynchronize ensures all GPU work between start and stop has
+  // completed before querying the elapsed time.
+  class GpuTimer
+  {
+  public:
+    GpuTimer()
+    {
+      cudaEventCreate(&start_event);
+      cudaEventCreate(&stop_event);
+    }
+
+    ~GpuTimer()
+    {
+      cudaEventDestroy(start_event);
+      cudaEventDestroy(stop_event);
+    }
+
+    void start()
+    {
+      cudaEventRecord(start_event, 0);
+    }
+
+    void stop()
+    {
+      cudaEventRecord(stop_event, 0);
+      cudaEventSynchronize(stop_event);
+    }
+
+    // Returns elapsed time in seconds.
+    double elapsed() const
+    {
+      float ms = 0;
+      cudaEventElapsedTime(&ms, start_event, stop_event);
+      return static_cast<double>(ms) / 1000.0;
+    }
+
+  private:
+    cudaEvent_t start_event;
+    cudaEvent_t stop_event;
+  };
 
 
   // @sect3{Class <code>VaryingCoefficientFunctor</code>}
@@ -594,6 +642,9 @@ namespace Step64
   template <int dim, int fe_degree>
   void HelmholtzProblem<dim, fe_degree>::solve()
   {
+    GpuTimer gpu_timer;
+
+    gpu_timer.start();
     system_matrix_dev->compute_diagonal();
 
     using PreconditionerType = PreconditionChebyshev<
@@ -609,16 +660,21 @@ namespace Step64
 
     PreconditionerType preconditioner;
     preconditioner.initialize(*system_matrix_dev, additional_data);
+    gpu_timer.stop();
+    pcout << "  Preconditioner setup (GPU) " << gpu_timer.elapsed() << "s"
+          << std::endl;
 
+    gpu_timer.start();
     SolverControl solver_control(system_rhs_dev.size(),
                                  1e-12 * system_rhs_dev.l2_norm());
     SolverCG<LinearAlgebra::distributed::Vector<double, MemorySpace::Default>>
       cg(solver_control);
     cg.solve(*system_matrix_dev, solution_dev, system_rhs_dev, preconditioner);
+    gpu_timer.stop();
+    pcout << "  CG solve           (GPU) " << gpu_timer.elapsed() << "s"
+          << " (" << solver_control.last_step() << " iterations)" << std::endl;
 
-    pcout << "  Solved in " << solver_control.last_step() << " iterations."
-          << std::endl;
-
+    gpu_timer.start();
     LinearAlgebra::ReadWriteVector<double> rw_vector(locally_owned_dofs);
     rw_vector.import_elements(solution_dev, VectorOperation::insert);
     ghost_solution_host.import_elements(rw_vector, VectorOperation::insert);
@@ -626,6 +682,9 @@ namespace Step64
     constraints.distribute(ghost_solution_host);
 
     ghost_solution_host.update_ghost_values();
+    gpu_timer.stop();
+    pcout << "  Device-to-host     (GPU) " << gpu_timer.elapsed() << "s"
+          << std::endl;
   }
 
   // The output results function is as usual since we have already copied the
@@ -678,24 +737,40 @@ namespace Step64
   template <int dim, int fe_degree>
   void HelmholtzProblem<dim, fe_degree>::run()
   {
-    for (unsigned int cycle = 0; cycle < 7 - dim; ++cycle)
+    for (unsigned int cycle = 0; cycle < 8 - dim; ++cycle)
       {
         pcout << "Cycle " << cycle << std::endl;
 
+        GpuTimer gpu_timer;
+
         if (cycle == 0)
-          GridGenerator::hyper_cube(triangulation, 0., 1.);
+          GridGenerator::subdivided_hyper_cube(triangulation, 5, 0., 1.);
         triangulation.refine_global(1);
 
+        gpu_timer.start();
         setup_system();
-
+        gpu_timer.stop();
         pcout << "   Number of active cells:       "
               << triangulation.n_global_active_cells() << std::endl
               << "   Number of degrees of freedom: " << dof_handler.n_dofs()
               << std::endl;
+        pcout << "  Setup system       (GPU) " << gpu_timer.elapsed() << "s"
+              << std::endl;
 
+        gpu_timer.start();
         assemble_rhs();
+        gpu_timer.stop();
+        pcout << "  Assemble RHS       (GPU) " << gpu_timer.elapsed() << "s"
+              << std::endl;
+
         solve();
+
+        gpu_timer.start();
         output_results(cycle);
+        gpu_timer.stop();
+        pcout << "  Output results     (GPU) " << gpu_timer.elapsed() << "s"
+              << std::endl;
+
         pcout << std::endl;
       }
   }
