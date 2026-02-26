@@ -247,11 +247,12 @@ namespace Step64
 
       const int cell = data->cell_index;
       // Manually implement for_each_quad_point for older dealii versions
+      // Use static constexpr n_q_points instead of data->n_q_points
       Kokkos::parallel_for(
-        Kokkos::TeamThreadRange(data->team_member, data->n_q_points),
+        Kokkos::TeamThreadRange(data->team_member, n_q_points),
         [&](const int &q) {
           const unsigned int flat =
-            data->local_q_point_id(cell, data->n_q_points, q);
+            data->local_q_point_id(cell, n_q_points, q);
           values_q[flat]   = fe_eval.get_value(q);
           const auto grad  = fe_eval.get_gradient(q);
           for (unsigned int d = 0; d < dim; ++d)
@@ -296,11 +297,12 @@ namespace Step64
 
       const int cell = data->cell_index;
       // Manually implement for_each_quad_point for older dealii versions
+      // Use static constexpr n_q_points instead of data->n_q_points
       Kokkos::parallel_for(
-        Kokkos::TeamThreadRange(data->team_member, data->n_q_points),
+        Kokkos::TeamThreadRange(data->team_member, n_q_points),
         [&](const int &q) {
           const unsigned int flat =
-            data->local_q_point_id(cell, data->n_q_points, q);
+            data->local_q_point_id(cell, n_q_points, q);
 
           fe_eval.submit_value(coef[flat] * values_q[flat], q);
 
