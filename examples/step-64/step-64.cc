@@ -246,13 +246,18 @@ namespace Step64
       fe_eval.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
 
       const int cell = data->cell_index;
-      data->for_each_quad_point([&](const int q) {
-        const unsigned int flat = data->local_q_point_id(cell, q);
-        values_q[flat]          = fe_eval.get_value(q);
-        const auto grad         = fe_eval.get_gradient(q);
-        for (unsigned int d = 0; d < dim; ++d)
-          gradients_q[flat * dim + d] = grad[d];
-      });
+      // Manually implement for_each_quad_point for older dealii versions
+      Kokkos::parallel_for(
+        Kokkos::TeamThreadRange(data->team_member, data->n_q_points),
+        [&](const int &q) {
+          const unsigned int flat =
+            data->local_q_point_id(cell, data->n_q_points, q);
+          values_q[flat]   = fe_eval.get_value(q);
+          const auto grad  = fe_eval.get_gradient(q);
+          for (unsigned int d = 0; d < dim; ++d)
+            gradients_q[flat * dim + d] = grad[d];
+        });
+      data->team_member.team_barrier();
     }
 
   private:
@@ -290,16 +295,21 @@ namespace Step64
         fe_eval(data);
 
       const int cell = data->cell_index;
-      data->for_each_quad_point([&](const int q) {
-        const unsigned int flat = data->local_q_point_id(cell, q);
+      // Manually implement for_each_quad_point for older dealii versions
+      Kokkos::parallel_for(
+        Kokkos::TeamThreadRange(data->team_member, data->n_q_points),
+        [&](const int &q) {
+          const unsigned int flat =
+            data->local_q_point_id(cell, data->n_q_points, q);
 
-        fe_eval.submit_value(coef[flat] * values_q[flat], q);
+          fe_eval.submit_value(coef[flat] * values_q[flat], q);
 
-        Tensor<1, dim, double> grad;
-        for (unsigned int d = 0; d < dim; ++d)
-          grad[d] = gradients_q[flat * dim + d];
-        fe_eval.submit_gradient(grad, q);
-      });
+          Tensor<1, dim, double> grad;
+          for (unsigned int d = 0; d < dim; ++d)
+            grad[d] = gradients_q[flat * dim + d];
+          fe_eval.submit_gradient(grad, q);
+        });
+      data->team_member.team_barrier();
 
       fe_eval.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
       fe_eval.distribute_local_to_global(dst);
