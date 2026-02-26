@@ -218,6 +218,100 @@ namespace Step64
   }
 
 
+  // @sect3{Class <code>EvaluateAndStoreKernel</code>}
+
+  // This class performs the first phase of the split kernel approach:
+  // read DOF values, evaluate them at quadrature points, and store
+  // the results to global memory intermediate buffers.
+  template <int dim, int fe_degree>
+  class EvaluateAndStoreKernel
+  {
+  public:
+    static constexpr unsigned int n_q_points =
+      Utilities::pow(fe_degree + 1, dim);
+
+    EvaluateAndStoreKernel(double *values_q, double *gradients_q)
+      : values_q(values_q)
+      , gradients_q(gradients_q)
+    {}
+
+    DEAL_II_HOST_DEVICE void
+    operator()(const typename Portable::MatrixFree<dim, double>::Data *data,
+               const Portable::DeviceVector<double>                   &src,
+               Portable::DeviceVector<double>                         &) const
+    {
+      Portable::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, double>
+        fe_eval(data);
+      fe_eval.read_dof_values(src);
+      fe_eval.evaluate(EvaluationFlags::values | EvaluationFlags::gradients);
+
+      const int cell = data->cell_index;
+      data->for_each_quad_point([&](const int q) {
+        const unsigned int flat = data->local_q_point_id(cell, q);
+        values_q[flat]          = fe_eval.get_value(q);
+        const auto grad         = fe_eval.get_gradient(q);
+        for (unsigned int d = 0; d < dim; ++d)
+          gradients_q[flat * dim + d] = grad[d];
+      });
+    }
+
+  private:
+    double *values_q;
+    double *gradients_q;
+  };
+
+
+  // @sect3{Class <code>ApplyAndIntegrateKernel</code>}
+
+  // This class performs the second phase: read values and gradients
+  // from intermediate buffers, apply the coefficient, integrate, and
+  // distribute to the global destination vector.
+  template <int dim, int fe_degree>
+  class ApplyAndIntegrateKernel
+  {
+  public:
+    static constexpr unsigned int n_q_points =
+      Utilities::pow(fe_degree + 1, dim);
+
+    ApplyAndIntegrateKernel(const double *coef,
+                            const double *values_q,
+                            const double *gradients_q)
+      : coef(coef)
+      , values_q(values_q)
+      , gradients_q(gradients_q)
+    {}
+
+    DEAL_II_HOST_DEVICE void
+    operator()(const typename Portable::MatrixFree<dim, double>::Data *data,
+               const Portable::DeviceVector<double>                   &,
+               Portable::DeviceVector<double>                         &dst) const
+    {
+      Portable::FEEvaluation<dim, fe_degree, fe_degree + 1, 1, double>
+        fe_eval(data);
+
+      const int cell = data->cell_index;
+      data->for_each_quad_point([&](const int q) {
+        const unsigned int flat = data->local_q_point_id(cell, q);
+
+        fe_eval.submit_value(coef[flat] * values_q[flat], q);
+
+        Tensor<1, dim, double> grad;
+        for (unsigned int d = 0; d < dim; ++d)
+          grad[d] = gradients_q[flat * dim + d];
+        fe_eval.submit_gradient(grad, q);
+      });
+
+      fe_eval.integrate(EvaluationFlags::values | EvaluationFlags::gradients);
+      fe_eval.distribute_local_to_global(dst);
+    }
+
+  private:
+    const double *coef;
+    const double *values_q;
+    const double *gradients_q;
+  };
+
+
   // @sect3{Class <code>HelmholtzOperator</code>}
 
   // The `HelmholtzOperator` class acts as wrapper for
@@ -258,6 +352,9 @@ namespace Step64
   private:
     Portable::MatrixFree<dim, double>                                mf_data;
     LinearAlgebra::distributed::Vector<double, MemorySpace::Default> coef;
+    // Intermediate buffers for the two-kernel split approach
+    Kokkos::View<double *, MemorySpace::Default::kokkos_space> values_q;
+    Kokkos::View<double *, MemorySpace::Default::kokkos_space> gradients_q;
     std::shared_ptr<DiagonalMatrix<
       LinearAlgebra::distributed::Vector<double, MemorySpace::Default>>>
       inverse_diagonal_entries;
@@ -300,6 +397,16 @@ namespace Step64
 
     const VaryingCoefficientFunctor<dim, fe_degree> functor(coef.get_values());
     mf_data.evaluate_coefficients(functor);
+
+    // Allocate intermediate buffers for the two-kernel split approach
+    constexpr unsigned int n_q = Utilities::pow(fe_degree + 1, dim);
+    values_q = Kokkos::View<double *, MemorySpace::Default::kokkos_space>(
+      Kokkos::view_alloc("intermediate_values", Kokkos::WithoutInitializing),
+      n_owned_cells * n_q);
+    gradients_q = Kokkos::View<double *, MemorySpace::Default::kokkos_space>(
+      Kokkos::view_alloc("intermediate_gradients",
+                         Kokkos::WithoutInitializing),
+      n_owned_cells * n_q * dim);
   }
 
 
@@ -318,9 +425,19 @@ namespace Step64
     const
   {
     dst = 0.;
-    LocalHelmholtzOperator<dim, fe_degree> helmholtz_operator(
-      coef.get_values());
-    mf_data.cell_loop(helmholtz_operator, src, dst);
+
+    // Kernel 1: read_dof_values + evaluate -> write to intermediate buffers
+    EvaluateAndStoreKernel<dim, fe_degree> eval_kernel(values_q.data(),
+                                                        gradients_q.data());
+    mf_data.cell_loop(eval_kernel, src, dst);
+    // The implicit Kokkos::fence() at the end of cell_loop ensures
+    // Kernel 1 completes before Kernel 2 starts
+
+    // Kernel 2: read intermediate buffers -> apply coefficient -> integrate -> dst
+    ApplyAndIntegrateKernel<dim, fe_degree> integrate_kernel(
+      coef.get_values(), values_q.data(), gradients_q.data());
+    mf_data.cell_loop(integrate_kernel, src, dst);
+
     mf_data.copy_constrained_values(src, dst);
   }
 
