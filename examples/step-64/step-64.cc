@@ -739,8 +739,10 @@ namespace Step64
     PreconditionerType preconditioner;
     preconditioner.initialize(*system_matrix_dev, additional_data);
 
-    SolverControl solver_control(system_rhs_dev.size(),
-                                 1e-12 * system_rhs_dev.l2_norm());
+    // FOR PROFILING: Limit to exactly 2 iterations
+    // Restore original: SolverControl solver_control(system_rhs_dev.size(), 1e-12 * system_rhs_dev.l2_norm());
+    SolverControl solver_control(2,    // max_iterations = 2 (for profiling)
+                                 1e100); // impossible tolerance (ensures we hit max_iterations)
     SolverCG<LinearAlgebra::distributed::Vector<double, MemorySpace::Default>>
       cg(solver_control);
     cg.solve(*system_matrix_dev, solution_dev, system_rhs_dev, preconditioner);
